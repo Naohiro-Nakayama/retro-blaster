@@ -422,6 +422,21 @@ const MAX_BOMBS = 3;
 const INVINCIBLE_TIME = 180; // フレーム数
 
 // =============================================
+// モンスタースプライト座標マップ (ssmonster.png内の位置)
+// 画像サイズ: 320x160
+// 構造: 黒ボーダー17px + 上段81px(7体) + 区切り4px + 下段61px(6体) + 黒ボーダー7px
+// 各エントリ: [sx, sy, sw, sh]
+// =============================================
+const SPRITE_MAP = {
+  basic:     [17,  7, 41, 81],  // ゴブリン (基本敵)
+  shooter:   [58,  7, 41, 81],  // 黒ローブ魔法使い (射撃敵)
+  fast:      [99,  7, 41, 81],  // 青い魔法球 (高速敵)
+  // 下段: y=88-91が行区切り(黒=透明化済み)、y=127以降に透かし文字あり
+  boss:      [17,  88, 48, 42],  // コウモリ (中ボス) y=88-129
+  finalBoss: [257, 88, 45, 42],  // 暗黒タコ (最終ボス) y=88-129
+};
+
+// =============================================
 // スターフィールド初期化
 // =============================================
 (function initStarfield() {
@@ -468,6 +483,34 @@ class Game {
     this.bindEvents();
     this.bindUI();
     this.loop = null;
+
+    // ssmonsterスプライトシートを読み込み、背景色を透過処理する
+    this.monsterImg = new Image();
+    this.monsterImgLoaded = false;
+    this.monsterCanvas = null;
+    this.monsterImg.onload = () => {
+      // オフスクリーンCanvasでベージュ背景 (201,187,171) と黒ボーダーを透明化
+      const oc = document.createElement('canvas');
+      oc.width = this.monsterImg.naturalWidth;
+      oc.height = this.monsterImg.naturalHeight;
+      const oc2 = oc.getContext('2d');
+      oc2.drawImage(this.monsterImg, 0, 0);
+      const id = oc2.getImageData(0, 0, oc.width, oc.height);
+      const d = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i+1], b = d[i+2];
+        // ベージュ背景色との距離を計算
+        const bgDist = Math.sqrt((r-201)**2 + (g-187)**2 + (b-171)**2);
+        // ベージュ背景 または 純黒ボーダーを透明化 (キャラのアウトライン濃灰=40は保持)
+        if (bgDist < 38 || (r < 18 && g < 18 && b < 18)) {
+          d[i+3] = 0;
+        }
+      }
+      oc2.putImageData(id, 0, 0);
+      this.monsterCanvas = oc;
+      this.monsterImgLoaded = true;
+    };
+    this.monsterImg.src = 'ssmonster.png';
   }
 
   reset() {
@@ -1209,104 +1252,88 @@ class Game {
     }
   }
 
+  // スプライト画像から敵を描画する共通ヘルパー
+  // spriteKey: SPRITE_MAPのキー / sizeOverride: 表示サイズの上書き
+  drawMonsterSprite(ctx, spriteKey, e, sizeOverride) {
+    const displaySize = sizeOverride || e.size;
+
+    if (!this.monsterImgLoaded || !this.monsterCanvas) {
+      // 画像未読み込み時は円形フォールバック
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, displaySize / 2, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+
+    const [sx, sy, sw, sh] = SPRITE_MAP[spriteKey];
+
+    // アスペクト比を保ちながら displaySize に収める
+    const ratio = Math.min(displaySize / sw, displaySize / sh);
+    const dw = sw * ratio;
+    const dh = sh * ratio;
+
+    // ピクセルアートのにじみ防止 / 背景透過済みcanvasを使用
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.monsterCanvas, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh);
+  }
+
   drawEnemyBasic(ctx, e) {
-    ctx.fillStyle = e.color;
-    const s = e.size / 2;
-    // 六角形っぽい形
-    ctx.beginPath();
-    ctx.moveTo(0, -s);
-    ctx.lineTo(s * 0.7, -s * 0.4);
-    ctx.lineTo(s * 0.7, s * 0.4);
-    ctx.lineTo(0, s);
-    ctx.lineTo(-s * 0.7, s * 0.4);
-    ctx.lineTo(-s * 0.7, -s * 0.4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = '#ff8899';
-    ctx.fillRect(-s * 0.25, -s * 0.25, s * 0.5, s * 0.5);
+    // ゴブリン (表示サイズを3倍にして見やすく)
+    this.drawMonsterSprite(ctx, 'basic', e, e.size * 3);
   }
 
   drawEnemyFast(ctx, e) {
-    ctx.fillStyle = e.color;
-    const s = e.size / 2;
-    // 菱形
-    ctx.beginPath();
-    ctx.moveTo(0, -s * 1.2);
-    ctx.lineTo(s * 0.6, 0);
-    ctx.lineTo(0, s * 0.8);
-    ctx.lineTo(-s * 0.6, 0);
-    ctx.closePath();
-    ctx.fill();
+    // 青い魔法球 (表示サイズを3倍)
+    this.drawMonsterSprite(ctx, 'fast', e, e.size * 3);
   }
 
   drawEnemyShooter(ctx, e) {
-    ctx.fillStyle = e.color;
-    const s = e.size / 2;
-    const rot = e.age * 0.02;
+    // 黒ローブ魔法使い + 回転する光輪で「射撃型」を表現
+    const s = e.size * 1.5;
     ctx.save();
-    ctx.rotate(rot);
-    // 外側リング
+    ctx.rotate(e.age * 0.025);
+    ctx.strokeStyle = e.color;
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.55;
     ctx.beginPath();
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      const r = i % 2 === 0 ? s : s * 0.6;
-      i === 0 ? ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r) : ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
-    }
-    ctx.closePath();
-    ctx.fill();
+    ctx.arc(0, 0, s, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
-    // 中心
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(0, 0, s * 0.3, 0, Math.PI * 2);
-    ctx.fill();
+
+    this.drawMonsterSprite(ctx, 'shooter', e, e.size * 3);
   }
 
   drawBoss(ctx, e) {
     const s = e.size / 2;
     const pulse = Math.sin(e.age * 0.05) * 0.1 + 1;
+    const spriteKey = e.isFinal ? 'finalBoss' : 'boss';
 
-    // 外側リング
+    // 外側パルスリング (ボス感を演出)
+    ctx.save();
     ctx.strokeStyle = e.color;
     ctx.lineWidth = 3;
+    ctx.shadowColor = e.color;
+    ctx.shadowBlur = 18;
     ctx.beginPath();
-    ctx.arc(0, 0, s * 1.2 * pulse, 0, Math.PI * 2);
+    ctx.arc(0, 0, s * 1.4 * pulse, 0, Math.PI * 2);
     ctx.stroke();
 
-    // メイン本体
-    ctx.fillStyle = e.isFinal ? '#660033' : '#003344';
-    ctx.beginPath();
-    for (let i = 0; i < 12; i++) {
-      const a = (i / 12) * Math.PI * 2 + e.age * 0.01;
-      const r = i % 2 === 0 ? s : s * 0.75;
-      i === 0 ? ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r) : ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+    // フェーズ2は追加リング
+    if (e.phase === 1) {
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 1.8 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
     }
-    ctx.closePath();
-    ctx.fill();
+    ctx.restore();
 
-    ctx.fillStyle = e.color;
-    ctx.beginPath();
-    for (let i = 0; i < 12; i++) {
-      const a = (i / 12) * Math.PI * 2 + e.age * 0.01;
-      const r = i % 2 === 0 ? s * 0.9 : s * 0.65;
-      i === 0 ? ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r) : ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
-    }
-    ctx.closePath();
-    ctx.fill();
-
-    // 核
-    ctx.fillStyle = '#ffffff';
-    ctx.shadowBlur = 20;
-    ctx.beginPath();
-    ctx.arc(0, 0, s * 0.3, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 砲口
-    for (let i = 0; i < 4; i++) {
-      const a = (i / 4) * Math.PI * 2 + e.age * 0.01;
-      ctx.fillStyle = e.color;
-      ctx.fillRect(Math.cos(a) * s * 0.5 - 3, Math.sin(a) * s * 0.5 - 3, 6, 6);
-    }
+    // スプライト本体 (パルスでわずかに拡縮)
+    ctx.save();
+    ctx.scale(pulse, pulse);
+    this.drawMonsterSprite(ctx, spriteKey, e, e.size * 2.2);
+    ctx.restore();
   }
 
   renderBullets(ctx) {
